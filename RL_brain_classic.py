@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+
 # Deep Q Network off-policy
 class DeepQNetwork:
     def __init__(
@@ -40,13 +41,21 @@ class DeepQNetwork:
         # initialize zero memory [s, a, r, s_]
         self.memory = np.zeros((self.memory_size, n_features * 2 + 2))
 
+        # try using GPU
+        if torch.cuda.is_available():
+            print('==> using GPU')
+            self.device = torch.device('cuda')
+        else:
+            print('==> using CPU')
+            self.device = torch.device('cpu')
+
         # consist of [target_net, evaluate_net]
         self._build_net()
         self.target_net.load_state_dict(self.eval_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = optim.RMSprop(self.eval_net.parameters(), lr=self.lr)
-        self.loss_func = nn.MSELoss()
+        self.loss_func = nn.MSELoss().to(self.device)
 
         self.cost_his = []
 
@@ -55,13 +64,13 @@ class DeepQNetwork:
             nn.Linear(self.n_features, 10),
             nn.ReLU(),
             nn.Linear(10, self.n_actions)
-        )
+        ).to(self.device)
 
         self.target_net = nn.Sequential(
             nn.Linear(self.n_features, 10),
             nn.ReLU(),
             nn.Linear(10, self.n_actions)
-        )
+        ).to(self.device)
 
     def store_transition(self, s, a, r, s_):
         if not hasattr(self, 'memory_counter'):
@@ -79,7 +88,7 @@ class DeepQNetwork:
         observation = torch.tensor(observation, dtype=torch.float).unsqueeze(0)
 
         if np.random.uniform() < self.epsilon:
-            actions_value = self.eval_net(observation)
+            actions_value = self.eval_net.forward(observation.to(self.device))
             action = torch.argmax(actions_value, dim=1).item()
         else:
             action = np.random.randint(0, self.n_actions)
@@ -95,14 +104,15 @@ class DeepQNetwork:
             sample_index = np.random.choice(self.memory_counter, size=self.batch_size)
         batch_memory = self.memory[sample_index, :]
 
-        q_next, q_eval = self.target_net(torch.tensor(batch_memory[:, -self.n_features:], dtype=torch.float)), self.eval_net(torch.tensor(batch_memory[:, :self.n_features], dtype=torch.float))
+        q_next = self.target_net.forward(torch.tensor(batch_memory[:, -self.n_features:], dtype=torch.float).to(self.device))
+        q_eval = self.eval_net.forward(torch.tensor(batch_memory[:, :self.n_features], dtype=torch.float).to(self.device))
 
         q_target = q_eval.clone().detach()
         batch_index = np.arange(self.batch_size, dtype=np.int32)
         eval_act_index = batch_memory[:, self.n_features].astype(int)
         reward = batch_memory[:, self.n_features + 1]
 
-        q_target[batch_index, eval_act_index] = reward + self.gamma * torch.max(q_next, dim=1)[0]
+        q_target[batch_index, eval_act_index] = torch.from_numpy(reward.astype(np.float32)).to(self.device) + self.gamma * torch.max(q_next, dim=1)[0]
 
         loss = self.loss_func(q_eval, q_target)
         self.optimizer.zero_grad()
