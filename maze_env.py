@@ -91,6 +91,19 @@ class Maze(tk.Tk, object):
         # return observation
         return (np.array(self.canvas.coords(self.rect)[:2]) - np.array(self.canvas.coords(self.oval)[:2]))/(MAZE_H*UNIT)
 
+    def action_is_valid(self, action):
+        s = self.canvas.coords(self.rect)
+        if action == 0:   # up
+            return s[1] > UNIT
+        elif action == 1:   # down
+            return s[1] < (MAZE_H - 1) * UNIT
+        elif action == 2:   # right
+            return s[0] < (MAZE_W - 1) * UNIT
+        elif action == 3:   # left
+            return s[0] > UNIT
+        else:
+            return False
+
     def step(self, action):
         s = self.canvas.coords(self.rect)
         base_action = np.array([0, 0])

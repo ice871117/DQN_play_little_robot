@@ -22,7 +22,8 @@ class DeepQNetwork:
             memory_size=500,
             batch_size=32,
             e_greedy_increment=None,
-            output_graph=False,
+            use_double_DQN=False,
+            is_train=False,
     ):
         self.n_actions = n_actions
         self.n_features = n_features
@@ -34,6 +35,10 @@ class DeepQNetwork:
         self.batch_size = batch_size
         self.epsilon_increment = e_greedy_increment
         self.epsilon = 0 if e_greedy_increment is not None else self.epsilon_max
+        self.is_train = is_train
+        self.use_double_DQN=use_double_DQN
+
+        self.mode_cache_path = "classic_dqn.pth"
 
         # total learning step
         self.learn_step_counter = 0
@@ -51,7 +56,10 @@ class DeepQNetwork:
 
         # consist of [target_net, evaluate_net]
         self._build_net()
-        self.target_net.load_state_dict(self.eval_net.state_dict())
+        if self.is_train:
+            self.target_net.load_state_dict(self.eval_net.state_dict())
+        else:
+            self.target_net.load_state_dict(torch.load(self.mode_cache_path))
         self.target_net.eval()
 
         self.optimizer = optim.RMSprop(self.eval_net.parameters(), lr=self.lr)
@@ -61,15 +69,15 @@ class DeepQNetwork:
 
     def _build_net(self):
         self.eval_net = nn.Sequential(
-            nn.Linear(self.n_features, 10),
+            nn.Linear(self.n_features, 128),
             nn.ReLU(),
-            nn.Linear(10, self.n_actions)
+            nn.Linear(128, self.n_actions)
         ).to(self.device)
 
         self.target_net = nn.Sequential(
-            nn.Linear(self.n_features, 10),
+            nn.Linear(self.n_features, 128),
             nn.ReLU(),
-            nn.Linear(10, self.n_actions)
+            nn.Linear(128, self.n_actions)
         ).to(self.device)
 
     def store_transition(self, s, a, r, s_):
@@ -94,6 +102,24 @@ class DeepQNetwork:
             action = np.random.randint(0, self.n_actions)
         return action
 
+    def choose_action_and_validate(self, observation, validation_func):
+        observation = torch.tensor(observation, dtype=torch.float).unsqueeze(0)
+
+        if np.random.uniform() < self.epsilon:
+            ret_index = 0
+            actions_value = self.eval_net.forward(observation.to(self.device))
+            values, indices = torch.topk(actions_value, 2, dim=1, sorted=True)
+            while ret_index < self.n_actions:
+                action = indices[0][ret_index].item()
+                if validation_func(action):
+                    break
+                ret_index += 1
+        else:
+            action = np.random.randint(0, self.n_actions)
+
+        return action
+
+
     def learn(self):
         if self.learn_step_counter % self.replace_target_iter == 0:
             self.target_net.load_state_dict(self.eval_net.state_dict())
@@ -106,13 +132,22 @@ class DeepQNetwork:
 
         q_next = self.target_net.forward(torch.tensor(batch_memory[:, -self.n_features:], dtype=torch.float).to(self.device))
         q_eval = self.eval_net.forward(torch.tensor(batch_memory[:, :self.n_features], dtype=torch.float).to(self.device))
+        if self.use_double_DQN:
+            q_eval_4next = self.eval_net.forward(torch.tensor(batch_memory[:, -self.n_features:], dtype=torch.float).to(self.device))
 
         q_target = q_eval.clone().detach()
         batch_index = np.arange(self.batch_size, dtype=np.int32)
         eval_act_index = batch_memory[:, self.n_features].astype(int)
         reward = batch_memory[:, self.n_features + 1]
+        reward_as_tensor = torch.from_numpy(reward.astype(np.float32)).to(self.device)
 
-        q_target[batch_index, eval_act_index] = torch.from_numpy(reward.astype(np.float32)).to(self.device) + self.gamma * torch.max(q_next, dim=1)[0]
+        if self.use_double_DQN:
+            max_act_next = torch.argmax(q_eval_4next, dim=1)
+            # Double DQN，eval网络里面下一步的最大收益会影响到训练目标
+            q_target[batch_index, eval_act_index] = reward_as_tensor + self.gamma * q_next[batch_index, max_act_next]
+        else:
+            # 经典DQN，当前Q网络里面下一步的最大收益会影响到训练目标
+            q_target[batch_index, eval_act_index] = reward_as_tensor + self.gamma * torch.max(q_next, dim=1)[0]
 
         loss = self.loss_func(q_eval, q_target)
         self.optimizer.zero_grad()
@@ -123,6 +158,10 @@ class DeepQNetwork:
 
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon < self.epsilon_max else self.epsilon_max
         self.learn_step_counter += 1
+
+
+    def save_to_cache(self):
+        torch.save(self.target_net.state_dict(), self.mode_cache_path)
 
     def plot_cost(self):
         import matplotlib.pyplot as plt
